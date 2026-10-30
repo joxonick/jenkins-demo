@@ -1,0 +1,78 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 30, unit: 'MINUTES')
+    }
+
+    parameters {
+        booleanParam(name: 'DEPLOY', defaultValue: true, description: 'Run approval and deploy stages?')
+    }
+
+    environment {
+        APP_VERSION = "1.0.${BUILD_NUMBER}"
+        DEPLOY_DIR  = 'C:\\jenkins-deploy'
+    }
+
+    stages {
+        stage('Setup') {
+            steps {
+                bat 'python -m venv .venv'
+                bat '.venv\\Scripts\\python -m pip install --quiet pytest flake8'
+            }
+        }
+
+        stage('Quality checks') {
+            parallel {
+                stage('Lint') {
+                    steps {
+                        bat '.venv\\Scripts\\python -m flake8 app.py test_app.py'
+                    }
+                }
+                stage('Unit tests') {
+                    steps {
+                        bat '.venv\\Scripts\\python -m pytest -v --junitxml=reports\\junit.xml'
+                    }
+                }
+            }
+        }
+
+        stage('Package') {
+            steps {
+                bat 'if not exist dist mkdir dist'
+                bat '.venv\\Scripts\\python -m zipfile -c dist\\jenkins-demo-%APP_VERSION%.zip app.py'
+                archiveArtifacts artifacts: 'dist/*.zip', fingerprint: true
+            }
+        }
+
+        stage('Approve') {
+            when { expression { params.DEPLOY } }
+            steps {
+                timeout(time: 15, unit: 'MINUTES') {
+                    input message: "Deploy version ${APP_VERSION}?", ok: 'Yes, deploy'
+                }
+            }
+        }
+
+        stage('Deploy') {
+            when { expression { params.DEPLOY } }
+            steps {
+                withCredentials([string(credentialsId: 'demo-api-token', variable: 'TOKEN')]) {
+                    bat 'echo Calling deploy API with token %TOKEN%'
+                }
+                bat 'if not exist %DEPLOY_DIR% mkdir %DEPLOY_DIR%'
+                bat 'copy /Y dist\\*.zip %DEPLOY_DIR%\\'
+                echo "Deployed ${APP_VERSION} to ${DEPLOY_DIR}"
+            }
+        }
+    }
+
+    post {
+        always  { junit allowEmptyResults: true, testResults: 'reports/*.xml' }
+        success { echo "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}" }
+        failure { echo "FAILED: see ${env.BUILD_URL}console" }
+        cleanup { cleanWs() }
+    }
+}
